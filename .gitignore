@@ -1,0 +1,42 @@
+# Данные подкастов и голосов
+podcasts/
+speaker_samples/
+output/
+*.mp3
+*.wav
+*.ogg
+*.m4a
+*.flac
+*.opus
+*.webm
+
+# Профили спикеров (создаются автоматически)
+speaker_profiles.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Тестовые файлы
+test_*.py
+check_*.py
