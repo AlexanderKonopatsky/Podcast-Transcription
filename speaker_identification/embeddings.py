@@ -89,7 +89,7 @@ class SpeakerEmbeddingExtractor:
         self,
         audio_path: str,
         segments: list,
-        max_duration: float = 60.0
+        max_duration: float = 180.0
     ) -> np.ndarray:
         """
         Извлечь эмбеддинг из нескольких сегментов аудиофайла.
@@ -97,7 +97,7 @@ class SpeakerEmbeddingExtractor:
         Args:
             audio_path: Путь к аудиофайлу
             segments: Список сегментов [{"start": float, "end": float}, ...]
-            max_duration: Максимальная суммарная длительность сегментов (сек)
+            max_duration: Максимальная суммарная длительность сегментов (сек, по умолчанию 180)
 
         Returns:
             centroid: np.ndarray shape (512,) - усреднённый эмбеддинг

@@ -74,6 +74,10 @@ torchaudio.load = _patched_torchaudio_load
 from faster_whisper import WhisperModel
 from pyannote.audio import Pipeline
 
+# Глобальная переменная для хранения whisper_model
+# Предотвращает segfault при выходе из функции (деструктор ctranslate2 падает)
+_whisper_model_holder = None
+
 # Модуль идентификации спикеров по голосу
 from speaker_identification import SpeakerEmbeddingExtractor, SpeakerProfileManager, SpeakerMatcher
 
@@ -99,7 +103,7 @@ def transcribe_podcast(
     language: str = "ru",
     model_size: str = "large-v3",
     speaker_profiles_path: str = None,
-    voice_threshold: float = 0.5,
+    voice_threshold: float = 0.65,
 ) -> dict:
     """
     Транскрибация подкаста с диаризацией спикеров.
@@ -111,7 +115,7 @@ def transcribe_podcast(
         language: Язык аудио (ru, en, etc.)
         model_size: Размер модели Whisper (tiny, base, small, medium, large-v3)
         speaker_profiles_path: Путь к файлу профилей спикеров (опционально)
-        voice_threshold: Порог cosine distance для определения спикера (0-1)
+        voice_threshold: Порог cosine distance для определения спикера (0-1, по умолчанию: 0.65)
     """
     # С PyTorch nightly (cu128) RTX 5080 поддерживается
     cuda_available = torch.cuda.is_available()
@@ -194,61 +198,97 @@ def transcribe_podcast(
             "speaker": speaker
         })
 
-    print(f"      Найдено {len(diarization_segments)} сегментов речи")
+    print(f"      Найдено {len(diarization_segments)} сегментов речи", flush=True)
 
-    # Освобождаем память
-    del diarization_pipeline
-    torch.cuda.empty_cache()
+    # Освобождаем память GPU - критично для длинных аудио!
+    # Используем None вместо del чтобы избежать segfault в нативных библиотеках
+    diarization_pipeline = None
+    waveform = None
+    audio_input = None
+    if cuda_available:
+        torch.cuda.empty_cache()
+        print(f"      VRAM после очистки: {torch.cuda.memory_allocated() / 1024**3:.2f} GB", flush=True)
 
     # 3. Транскрибация - на GPU через ctranslate2 (работает с RTX 5080)
-    print(f"\n[2/2] Транскрибация (распознавание речи)...")
-    print(f"      Загрузка модели Whisper ({model_size})...")
+    print(f"\n[2/2] Транскрибация (распознавание речи)...", flush=True)
+    print(f"      Загрузка модели Whisper ({model_size})...", flush=True)
 
     # faster-whisper использует ctranslate2 который поддерживает новые GPU
     whisper_device = "cuda" if cuda_available else "cpu"
     compute_type = "float16" if whisper_device == "cuda" else "int8"
     whisper_model = WhisperModel(model_size, device=whisper_device, compute_type=compute_type)
 
-    print(f"      Распознавание речи...")
+    # Сохраняем в глобальную переменную чтобы деструктор не вызвался при выходе из функции
+    # (деструктор ctranslate2 вызывает segfault)
+    global _whisper_model_holder
+    _whisper_model_holder = whisper_model
+
+    print(f"      Распознавание речи...", flush=True)
+
+    # faster-whisper сам загружает аудио через ffmpeg (потоково, без MemoryError)
     segments, info = whisper_model.transcribe(
-        audio_path,
+        str(audio_path),  # передаём путь к файлу, НЕ массив
         language=language,
         beam_size=5,
         word_timestamps=True,
         vad_filter=True,
     )
 
-    # Собираем транскрипцию
+    print(f"      Язык: {info.language}, вероятность: {info.language_probability:.2f}", flush=True)
+
+    # Собираем транскрипцию с прогрессом (чтобы видеть что скрипт работает)
     transcription_segments = []
-    for segment in segments:
-        transcription_segments.append({
-            "start": segment.start,
-            "end": segment.end,
-            "text": segment.text.strip(),
-            "words": [
-                {"start": w.start, "end": w.end, "word": w.word}
-                for w in (segment.words or [])
-            ]
-        })
+    segment_count = 0
+    try:
+        for segment in segments:
+            segment_count += 1
+            if segment_count % 100 == 0:
+                print(f"      Обработано {segment_count} сегментов...", flush=True)
 
-    print(f"      Распознано {len(transcription_segments)} сегментов текста")
+            transcription_segments.append({
+                "start": segment.start,
+                "end": segment.end,
+                "text": segment.text.strip(),
+                "words": [
+                    {"start": w.start, "end": w.end, "word": w.word}
+                    for w in (segment.words or [])
+                ]
+            })
+    except Exception as e:
+        print(f"\n      ОШИБКА при сборе сегментов: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        raise
 
-    del whisper_model
-    torch.cuda.empty_cache()
+    print(f"      Распознано {len(transcription_segments)} сегментов текста", flush=True)
+
+    # НЕ трогаем whisper_model - любое обращение к нему вызывает segfault в ctranslate2
+    # Python сам освободит объект при выходе из функции
 
     # 4. Объединение результатов (привязка спикеров к тексту)
-    print(f"\nОбъединение результатов...")
+    print(f"\nОбъединение результатов...", flush=True)
+
+    # Предварительно сортируем сегменты диаризации для бинарного поиска
+    diarization_segments.sort(key=lambda x: x["start"])
 
     result_segments = []
-    for trans_seg in transcription_segments:
+    for i, trans_seg in enumerate(transcription_segments):
         # Находим спикера для этого сегмента
         trans_mid = (trans_seg["start"] + trans_seg["end"]) / 2
         speaker = "Unknown"
 
-        for diar_seg in diarization_segments:
+        # Бинарный поиск вместо линейного (O(log n) вместо O(n))
+        left, right = 0, len(diarization_segments) - 1
+        while left <= right:
+            mid = (left + right) // 2
+            diar_seg = diarization_segments[mid]
             if diar_seg["start"] <= trans_mid <= diar_seg["end"]:
                 speaker = diar_seg["speaker"]
                 break
+            elif trans_mid < diar_seg["start"]:
+                right = mid - 1
+            else:
+                left = mid + 1
 
         result_segments.append({
             "start": trans_seg["start"],
@@ -257,6 +297,10 @@ def transcribe_podcast(
             "speaker": speaker,
             "words": trans_seg["words"]
         })
+
+        # Прогресс каждые 1000 сегментов
+        if (i + 1) % 1000 == 0:
+            print(f"      Обработано {i + 1}/{len(transcription_segments)} сегментов...", flush=True)
 
     # 5. Идентификация спикеров по профилям (опционально)
     speaker_mapping = None
@@ -318,7 +362,7 @@ def transcribe_podcast(
         else:
             print(f"\n      Файл профилей не найден: {speaker_profiles_path}")
 
-    print("\nГотово!")
+    print(f"\nГотово! Итого сегментов: {len(result_segments)}", flush=True)
 
     return {
         "segments": result_segments,
@@ -377,42 +421,49 @@ def save_results(result: dict, output_path: str, format: str = "txt"):
     """
     output_path = Path(output_path)
 
-    if format == "json":
-        output_path = output_path.with_suffix(".json")
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
+    try:
+        if format == "json":
+            output_path = output_path.with_suffix(".json")
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(result, f, ensure_ascii=False, indent=2)
 
-    elif format == "srt":
-        output_path = output_path.with_suffix(".srt")
-        lines = []
-        for i, segment in enumerate(result.get("segments", []), 1):
-            start = segment.get("start", 0)
-            end = segment.get("end", 0)
-            speaker = segment.get("speaker", "")
-            text = segment.get("text", "").strip()
+        elif format == "srt":
+            output_path = output_path.with_suffix(".srt")
+            lines = []
+            for i, segment in enumerate(result.get("segments", []), 1):
+                start = segment.get("start", 0)
+                end = segment.get("end", 0)
+                speaker = segment.get("speaker", "")
+                text = segment.get("text", "").strip()
 
-            start_time = f"{int(start//3600):02d}:{int((start%3600)//60):02d}:{int(start%60):02d},{int((start%1)*1000):03d}"
-            end_time = f"{int(end//3600):02d}:{int((end%3600)//60):02d}:{int(end%60):02d},{int((end%1)*1000):03d}"
+                start_time = f"{int(start//3600):02d}:{int((start%3600)//60):02d}:{int(start%60):02d},{int((start%1)*1000):03d}"
+                end_time = f"{int(end//3600):02d}:{int((end%3600)//60):02d}:{int(end%60):02d},{int((end%1)*1000):03d}"
 
-            lines.append(str(i))
-            lines.append(f"{start_time} --> {end_time}")
-            if speaker:
-                lines.append(f"[{speaker}] {text}")
-            else:
-                lines.append(text)
-            lines.append("")
+                lines.append(str(i))
+                lines.append(f"{start_time} --> {end_time}")
+                if speaker:
+                    lines.append(f"[{speaker}] {text}")
+                else:
+                    lines.append(text)
+                lines.append("")
 
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
+            with open(output_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
 
-    else:  # txt
-        output_path = output_path.with_suffix(".txt")
-        transcript = format_transcript(result)
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(transcript)
+        else:  # txt
+            output_path = output_path.with_suffix(".txt")
+            transcript = format_transcript(result)
+            with open(output_path, "w", encoding="utf-8") as f:
+                f.write(transcript)
 
-    print(f"Сохранено: {output_path}")
-    return output_path
+        print(f"Сохранено: {output_path}", flush=True)
+        return output_path
+
+    except Exception as e:
+        print(f"ОШИБКА при сохранении {output_path}: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        raise
 
 
 def process_batch(input_dir: str, output_dir: str, hf_token: str, **kwargs):
@@ -545,8 +596,8 @@ def main():
     speaker_group.add_argument(
         "--voice-threshold",
         type=float,
-        default=0.5,
-        help="Порог cosine distance для определения спикера (0-1, по умолчанию: 0.5)"
+        default=0.65,
+        help="Порог cosine distance для определения спикера (0-1, по умолчанию: 0.65)"
     )
 
     # Управление профилями
