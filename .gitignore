@@ -40,3 +40,9 @@ Thumbs.db
 # Тестовые файлы
 test_*.py
 check_*.py
+
+# Приватные данные podcast_bot
+podcast_bot/data/
+podcast_bot/speakers/
+podcast_bot/sessions/
+podcast_bot/__pycache__/
