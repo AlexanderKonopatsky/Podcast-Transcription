@@ -211,17 +211,40 @@ def transcribe_podcast(
 
     # 3. Транскрибация - на GPU через ctranslate2 (работает с RTX 5080)
     print(f"\n[2/2] Транскрибация (распознавание речи)...", flush=True)
-    print(f"      Загрузка модели Whisper ({model_size})...", flush=True)
 
     # faster-whisper использует ctranslate2 который поддерживает новые GPU
     whisper_device = "cuda" if cuda_available else "cpu"
     compute_type = "float16" if whisper_device == "cuda" else "int8"
-    whisper_model = WhisperModel(model_size, device=whisper_device, compute_type=compute_type)
 
-    # Сохраняем в глобальную переменную чтобы деструктор не вызвался при выходе из функции
-    # (деструктор ctranslate2 вызывает segfault)
+    # Управление глобальной моделью для batch режима
+    # Переиспользуем модель если она уже загружена (экономия времени и памяти)
     global _whisper_model_holder
-    _whisper_model_holder = whisper_model
+
+    # Проверяем нужно ли загружать новую модель
+    need_new_model = (_whisper_model_holder is None or
+                      getattr(_whisper_model_holder, 'model_size_or_path', None) != model_size)
+
+    if need_new_model:
+        # Освобождаем старую модель если есть
+        if _whisper_model_holder is not None:
+            print(f"      Выгрузка предыдущей модели ({getattr(_whisper_model_holder, 'model_size_or_path', 'unknown')})...", flush=True)
+            _whisper_model_holder = None
+            if cuda_available:
+                import gc
+                gc.collect()
+                torch.cuda.empty_cache()
+
+        # Загружаем новую модель
+        print(f"      Загрузка модели Whisper ({model_size})...", flush=True)
+        whisper_model = WhisperModel(model_size, device=whisper_device, compute_type=compute_type)
+
+        # Сохраняем в глобальную переменную чтобы деструктор не вызвался при выходе из функции
+        # (деструктор ctranslate2 вызывает segfault)
+        _whisper_model_holder = whisper_model
+    else:
+        # Переиспользуем уже загруженную модель
+        print(f"      Используется загруженная модель Whisper ({model_size})", flush=True)
+        whisper_model = _whisper_model_holder
 
     print(f"      Распознавание речи...", flush=True)
 
@@ -489,62 +512,128 @@ def save_results(result: dict, output_path: str, format: str = "txt"):
 def process_batch(input_dir: str, output_dir: str, hf_token: str, **kwargs):
     """
     Обработка всех аудиофайлов из папки.
+    Пропускает файлы для которых уже существует .txt файл.
+    Сохраняет результаты в ту же папку где находится MP3.
 
     Args:
         input_dir: Папка с подкастами
-        output_dir: Папка для результатов
+        output_dir: (DEPRECATED) Игнорируется - результаты сохраняются рядом с MP3
         hf_token: HuggingFace токен
         **kwargs: Параметры для transcribe_podcast
     """
     input_path = Path(input_dir)
-    output_path = Path(output_dir)
+
+    # Предупреждение о deprecated параметре
+    if output_dir != "output":  # не стандартное значение
+        print(f"⚠ ВНИМАНИЕ: --output-dir игнорируется в batch режиме")
+        print(f"  Результаты сохраняются в ту же папку что и MP3 файлы\n")
 
     # Поддерживаемые форматы
     audio_extensions = {'.mp3', '.wav', '.ogg', '.m4a', '.flac', '.opus', '.webm'}
 
     # Находим все аудиофайлы
-    audio_files = [
+    all_audio_files = [
         f for f in input_path.iterdir()
         if f.is_file() and f.suffix.lower() in audio_extensions
     ]
 
-    if not audio_files:
+    if not all_audio_files:
         print(f"В папке {input_dir} не найдено аудиофайлов")
         print(f"Поддерживаемые форматы: {', '.join(audio_extensions)}")
         return 0
 
-    print(f"Найдено {len(audio_files)} аудиофайлов для обработки\n")
+    # Фильтруем файлы: пропускаем те, для которых есть TXT
+    files_to_process = []
+    skipped_files = []
 
-    # Обрабатываем каждый файл
-    for i, audio_file in enumerate(audio_files, 1):
+    for audio_file in all_audio_files:
+        txt_file = audio_file.with_suffix('.txt')
+        if txt_file.exists():
+            skipped_files.append(audio_file)
+        else:
+            files_to_process.append(audio_file)
+
+    # Статистика
+    print("=" * 80)
+    print("BATCH ОБРАБОТКА")
+    print("=" * 80)
+    print(f"Папка: {input_dir}")
+    print(f"Всего аудиофайлов: {len(all_audio_files)}")
+    print(f"  - Новых (будут обработаны): {len(files_to_process)}")
+    print(f"  - Пропущено (уже есть .txt): {len(skipped_files)}")
+
+    if skipped_files:
+        print(f"\nПропущенные файлы (уже обработаны):")
+        for f in skipped_files:
+            print(f"  ✓ {f.name}")
+
+    if not files_to_process:
+        print("\n" + "=" * 80)
+        print("Нет новых файлов для обработки!")
+        print("Совет: удалите .txt файл если хотите переобработать")
         print("=" * 80)
-        print(f"[{i}/{len(audio_files)}] Обработка: {audio_file.name}")
+        return 0
+
+    print(f"\nФайлы для обработки:")
+    for f in files_to_process:
+        print(f"  → {f.name}")
+    print()
+
+    # Обрабатываем только новые файлы
+    success_count = 0
+    error_count = 0
+
+    for i, audio_file in enumerate(files_to_process, 1):
+        print("=" * 80)
+        print(f"[{i}/{len(files_to_process)}] Обработка: {audio_file.name}")
         print("=" * 80)
 
         try:
             # Транскрибация
             result = transcribe_podcast(str(audio_file), hf_token, **kwargs)
 
-            # Формируем имя выходного файла
-            output_name = audio_file.stem
+            # Формируем базовый путь в ТОЙ ЖЕ папке где MP3
+            output_base = audio_file.with_suffix('')
 
-            # Сохраняем результаты
-            output_base = output_path / output_name
-
-            # Сохраняем в нескольких форматах
+            # Сохраняем результаты в 3 форматах
             save_results(result, str(output_base), "txt")
             save_results(result, str(output_base), "json")
             save_results(result, str(output_base), "srt")
 
+            success_count += 1
             print(f"\n✓ Завершено: {audio_file.name}\n")
 
         except Exception as e:
+            error_count += 1
             print(f"\n✗ Ошибка при обработке {audio_file.name}: {e}\n")
+            import traceback
+            traceback.print_exc()
             continue
 
+    # Финальная статистика
     print("=" * 80)
-    print(f"Обработка завершена! Результаты в папке: {output_dir}")
+    print("ОБРАБОТКА ЗАВЕРШЕНА")
     print("=" * 80)
+    print(f"Результаты:")
+    print(f"  ✓ Успешно обработано: {success_count}")
+    if error_count > 0:
+        print(f"  ✗ Ошибок: {error_count}")
+    if skipped_files:
+        print(f"  ⊘ Пропущено (уже обработаны): {len(skipped_files)}")
+    print(f"\nВсе результаты сохранены в папке: {input_dir}")
+    print("=" * 80)
+
+    # Очистка памяти после batch обработки
+    global _whisper_model_holder
+    if _whisper_model_holder is not None:
+        print("\nВыгрузка модели Whisper из памяти...")
+        _whisper_model_holder = None
+        cuda_available = torch.cuda.is_available()
+        if cuda_available:
+            import gc
+            gc.collect()
+            torch.cuda.empty_cache()
+            print(f"VRAM освобождена: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
 
     return 0
 
@@ -560,7 +649,14 @@ def main():
   # Обработка одного файла
   python transcribe.py audio.mp3 --token hf_xxxxx
 
-  # Batch обработка (все файлы из папки podcasts)
+  # Batch обработка (пропускает уже обработанные файлы)
+  python transcribe.py --batch --token hf_xxxxx
+
+  # Результаты сохраняются рядом с MP3:
+  # podcasts/audio.mp3 -> podcasts/audio.txt, audio.json, audio.srt
+
+  # Для переобработки файла - удалите .txt:
+  del podcasts/audio.txt
   python transcribe.py --batch --token hf_xxxxx
 
   # С определением имён спикеров по голосу:
@@ -589,7 +685,7 @@ def main():
     parser.add_argument("--token", required=True, help="HuggingFace токен")
     parser.add_argument("--batch", action="store_true", help="Режим batch обработки всех файлов из папки")
     parser.add_argument("--input", default="podcasts", help="Папка с подкастами (для batch режима, по умолчанию: podcasts)")
-    parser.add_argument("--output-dir", default="output", help="Папка для результатов (для batch режима, по умолчанию: output)")
+    parser.add_argument("--output-dir", default="output", help="(DEPRECATED в batch режиме) Результаты сохраняются в ту же папку что и MP3 файлы. Для одиночных файлов используйте --output")
     parser.add_argument("--speakers", type=int, default=3, help="Количество спикеров (по умолчанию: 3)")
     parser.add_argument("--language", default="ru", help="Язык аудио (по умолчанию: ru)")
     parser.add_argument(
