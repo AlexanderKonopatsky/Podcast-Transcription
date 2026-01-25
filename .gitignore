@@ -45,4 +45,6 @@ check_*.py
 podcast_bot/data/
 podcast_bot/speakers/
 podcast_bot/sessions/
+podcast_bot/logs/
 podcast_bot/__pycache__/
+*.jsonl

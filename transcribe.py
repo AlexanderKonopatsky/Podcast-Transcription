@@ -322,16 +322,36 @@ def transcribe_podcast(
                     speaker_segments[seg["speaker"]].append(seg)
 
                 # Извлекаем эмбеддинги для каждого спикера из аудио
-                print(f"      Извлечение эмбеддингов спикеров...")
+                import time as _time
+                print(f"      Извлечение эмбеддингов спикеров ({len(diarization_labels)} спикеров)...", flush=True)
+
+                # Показываем статистику по сегментам каждого спикера
+                print(f"      Статистика сегментов:", flush=True)
+                for label in diarization_labels:
+                    segs = speaker_segments[label]
+                    total_dur = sum(s["end"] - s["start"] for s in segs)
+                    print(f"        {label}: {len(segs)} сегментов, {total_dur:.1f} сек речи", flush=True)
+
                 extractor = SpeakerEmbeddingExtractor(hf_token, device=str(device))
+                extraction_start = _time.time()
 
                 speaker_embeddings_dict = {}
-                for label in diarization_labels:
+                for idx, label in enumerate(diarization_labels, 1):
+                    print(f"      [{idx}/{len(diarization_labels)}] Обработка {label}...", flush=True)
                     segments = speaker_segments[label]
-                    embedding = extractor.extract_from_segments(audio_path, segments)
+                    embedding = extractor.extract_from_segments(
+                        audio_path,
+                        segments,
+                        speaker_label=label,
+                        verbose=True
+                    )
                     if embedding is not None:
                         speaker_embeddings_dict[label] = embedding
+                    else:
+                        print(f"          ⚠ Не удалось извлечь эмбеддинг для {label}", flush=True)
 
+                extraction_elapsed = _time.time() - extraction_start
+                print(f"      Извлечение завершено за {extraction_elapsed:.1f} сек", flush=True)
                 extractor.unload_model()
 
                 # Формируем массив эмбеддингов в том же порядке что и labels
