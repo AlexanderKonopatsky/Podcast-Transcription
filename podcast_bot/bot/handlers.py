@@ -29,8 +29,19 @@ def load_session(user_id: int) -> dict:
     session_path = SESSIONS_DIR / f"{user_id}.json"
     if session_path.exists():
         with open(session_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {"speaker": None, "model": None, "history": [], "waiting_for_model": False}
+            session = json.load(f)
+            # Add time_filter if not present (backward compatibility)
+            if "time_filter" not in session:
+                session["time_filter"] = "balanced"
+            return session
+    return {
+        "speaker": None,
+        "model": None,
+        "history": [],
+        "waiting_for_model": False,
+        "waiting_for_dates": False,
+        "time_filter": "balanced"  # Default: temporal decay mode
+    }
 
 
 def save_session(user_id: int, session: dict):
@@ -89,6 +100,33 @@ async def cmd_clear(message: Message):
         await message.answer("История очищена.")
 
 
+@router.message(Command("help"))
+async def cmd_help(message: Message):
+    """Show help message with all commands."""
+    help_text = (
+        "<b>📚 Справка по командам</b>\n\n"
+        "<b>Основные команды:</b>\n"
+        "/start - начать работу с ботом\n"
+        "/switch - сменить персонажа\n"
+        "/clear - очистить историю диалога\n"
+        "/model - выбрать модель LLM\n"
+        "/menu - показать меню\n"
+        "/help - показать эту справку\n\n"
+        "<b>⏱ Управление временным контекстом:</b>\n"
+        "/time_mode - показать текущий режим\n"
+        "/recent - только свежие (2 недели) 🔥\n"
+        "/balanced - балансированный (по умолчанию) ⚖️\n"
+        "/historical - вся история 📚\n"
+        "/date_range - выбрать период 📅\n\n"
+        "<b>Режимы временного контекста:</b>\n"
+        "• <b>Recent</b> - показывает только подкасты за последние 2 недели\n"
+        "• <b>Balanced</b> - приоритизирует свежие мнения (~70%), но учитывает и историю (~30%)\n"
+        "• <b>Historical</b> - все подкасты имеют равный вес, хорошо для анализа изменений мнений\n"
+        "• <b>Date Range</b> - выбрать конкретный период для поиска\n"
+    )
+    await message.answer(help_text, parse_mode="HTML")
+
+
 @router.message(Command("menu"))
 async def cmd_menu(message: Message):
     """Show menu with actions."""
@@ -107,7 +145,7 @@ async def cmd_model(message: Message):
     for i, (model_id, description) in enumerate(models, 1):
         model_list += f"{i}. {description}\n"
 
-    model_list += "\nОтправьте номер модели для выбора (1-4)"
+    model_list += "\nОтправьте номер модели для выбора (1-2)"
 
     # Set waiting flag
     session = load_session(message.from_user.id)
@@ -115,6 +153,124 @@ async def cmd_model(message: Message):
     save_session(message.from_user.id, session)
 
     await message.answer(model_list)
+
+
+@router.message(Command("recent"))
+async def cmd_recent(message: Message):
+    """Switch to recent mode (last 2 weeks only)."""
+    user_id = message.from_user.id
+    session = load_session(user_id)
+
+    session["time_filter"] = "recent"
+    save_session(user_id, session)
+
+    await message.answer(
+        "✅ Режим: <b>Свежие подкасты</b>\n"
+        "Показываю только последние 2 недели.\n\n"
+        "Другие режимы:\n"
+        "/balanced - балансированный (default)\n"
+        "/historical - вся история\n"
+        "/date_range - выбрать период",
+        parse_mode="HTML"
+    )
+
+
+@router.message(Command("balanced"))
+async def cmd_balanced(message: Message):
+    """Switch to balanced mode (temporal decay)."""
+    user_id = message.from_user.id
+    session = load_session(user_id)
+
+    session["time_filter"] = "balanced"
+    save_session(user_id, session)
+
+    await message.answer(
+        "✅ Режим: <b>Балансированный</b> (по умолчанию)\n"
+        "~70% свежие мнения (2 недели) + ~30% история.\n"
+        "Старые мнения не исчезают, но понижаются.",
+        parse_mode="HTML"
+    )
+
+
+@router.message(Command("historical"))
+async def cmd_historical(message: Message):
+    """Switch to historical mode (all history, no decay)."""
+    user_id = message.from_user.id
+    session = load_session(user_id)
+
+    session["time_filter"] = "historical"
+    save_session(user_id, session)
+
+    await message.answer(
+        "✅ Режим: <b>Вся история</b>\n"
+        "Все подкасты имеют равный вес.\n"
+        "Подходит для вопросов типа:\n"
+        "\"Как менялось мнение о BTC за год?\"",
+        parse_mode="HTML"
+    )
+
+
+@router.message(Command("date_range"))
+async def cmd_date_range(message: Message):
+    """Initiate custom date range selection."""
+    user_id = message.from_user.id
+    session = load_session(user_id)
+
+    session["waiting_for_dates"] = True
+    save_session(user_id, session)
+
+    await message.answer(
+        "📅 Отправьте диапазон дат в формате:\n"
+        "<code>YYYY-MM-DD YYYY-MM-DD</code>\n\n"
+        "Пример: <code>2025-12-01 2026-01-15</code>\n\n"
+        "Или /cancel для отмены",
+        parse_mode="HTML"
+    )
+
+
+@router.message(Command("time_mode"))
+async def cmd_time_mode(message: Message):
+    """Show current time filter mode."""
+    user_id = message.from_user.id
+    session = load_session(user_id)
+
+    time_filter = session.get("time_filter", "balanced")
+
+    # Format mode description
+    mode_descriptions = {
+        "recent": "🔥 Свежие подкасты (последние 2 недели)",
+        "balanced": "⚖️ Балансированный (70% свежие / 30% история)",
+        "historical": "📚 Вся история (без фильтра)"
+    }
+
+    if isinstance(time_filter, dict):
+        description = f"📅 Кастомный период: {time_filter['start']} — {time_filter['end']}"
+    else:
+        description = mode_descriptions.get(time_filter, "⚖️ Балансированный")
+
+    await message.answer(
+        f"<b>Текущий режим:</b>\n{description}\n\n"
+        "Изменить: /recent | /balanced | /historical | /date_range",
+        parse_mode="HTML"
+    )
+
+
+@router.message(Command("cancel"))
+async def cmd_cancel(message: Message):
+    """Cancel current operation."""
+    user_id = message.from_user.id
+    session = load_session(user_id)
+
+    if session.get("waiting_for_dates"):
+        session["waiting_for_dates"] = False
+        save_session(user_id, session)
+        await message.answer("Отменено.")
+    elif session.get("waiting_for_model"):
+        session["waiting_for_model"] = False
+        save_session(user_id, session)
+        await message.answer("Отменено.")
+    else:
+        await message.answer("Нечего отменять.")
 
 
 # Callback handlers
@@ -132,10 +288,17 @@ async def callback_speaker(callback: CallbackQuery):
     await callback.message.edit_text(
         f"Вы выбрали: {speaker}\n\n"
         f"Теперь можете задавать вопросы. Я буду отвечать в стиле {speaker}.\n\n"
-        f"Команды:\n"
+        f"<b>Основные команды:</b>\n"
         f"/switch - сменить персонажа\n"
         f"/clear - очистить историю диалога\n"
-        f"/model - выбрать модель (llm)"
+        f"/model - выбрать модель (llm)\n\n"
+        f"<b>⏱ Управление временным контекстом:</b>\n"
+        f"/time_mode - показать текущий режим\n"
+        f"/recent - только свежие (2 недели) 🔥\n"
+        f"/balanced - балансированный (по умолчанию) ⚖️\n"
+        f"/historical - вся история 📚\n"
+        f"/date_range - выбрать период 📅",
+        parse_mode="HTML"
     )
     await callback.answer()
 
@@ -198,6 +361,45 @@ async def handle_message(message: Message):
         await message.answer(f"✓ Модель изменена на: {model_name}")
         return
 
+    # Check if waiting for date range input
+    if session.get("waiting_for_dates", False):
+        from datetime import datetime
+        try:
+            # Parse format "YYYY-MM-DD YYYY-MM-DD"
+            dates = message.text.strip().split()
+            if len(dates) != 2:
+                raise ValueError("Нужно 2 даты")
+
+            start_date = datetime.fromisoformat(dates[0]).date()
+            end_date = datetime.fromisoformat(dates[1]).date()
+
+            if start_date > end_date:
+                raise ValueError("Начальная дата позже конечной")
+
+            # Save to session
+            session["time_filter"] = {
+                "start": dates[0],
+                "end": dates[1]
+            }
+            session["waiting_for_dates"] = False
+            save_session(message.from_user.id, session)
+
+            await message.answer(
+                f"✅ Установлен диапазон:\n"
+                f"📅 {dates[0]} — {dates[1]}",
+                parse_mode="HTML"
+            )
+            return
+
+        except (ValueError, IndexError) as e:
+            await message.answer(
+                "❌ Неверный формат. Используйте:\n"
+                "<code>YYYY-MM-DD YYYY-MM-DD</code>\n\n"
+                "Или /cancel для отмены",
+                parse_mode="HTML"
+            )
+            return
+
     speaker = session.get("speaker")
 
     if not speaker:
@@ -221,7 +423,8 @@ async def handle_message(message: Message):
 
     # Search for context
     try:
-        rag_results = search(user_input, speaker=speaker, top_k=25)
+        time_filter = session.get("time_filter", "balanced")
+        rag_results = search(user_input, speaker=speaker, top_k=25, time_filter=time_filter)
         rag_context = format_search_results(rag_results, speaker=speaker)
     except Exception as e:
         print(f"Search error: {e}")
@@ -271,9 +474,9 @@ async def handle_message(message: Message):
     history.append({"role": "user", "content": user_input})
     history.append({"role": "assistant", "content": response_text})
 
-    # Keep last 10 messages
-    if len(history) > 10:
-        history = history[-10:]
+    # No limit on session storage - keep all history
+    # if len(history) > 10:
+    #     history = history[-10:]
 
     session["history"] = history
     save_session(message.from_user.id, session)

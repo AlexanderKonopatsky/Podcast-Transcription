@@ -1,0 +1,97 @@
+# Аудиофайлы - не нужны для анализа кода
+podcasts/
+speaker_samples/
+*.mp3
+*.wav
+*.ogg
+*.m4a
+*.flac
+*.opus
+*.webm
+
+# Результаты транскрибации
+output/
+
+# Профили спикеров (могут быть большими)
+speaker_profiles.json
+
+# Приватные данные podcast_bot
+podcast_bot/data/
+podcast_bot/config/local_*.py
+podcast_bot/*.json
+podcast_bot/*.db
+podcast_bot/.env*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Логи и временные файлы
+*.log
+*.tmp
+*.temp
+*.cache
+
+# Модели и кэши ML
+.cache/
+models/
+*.pt
+*.pth
+*.bin
+*.onnx
+transformers_cache/
+torch_cache/
+
+# Git и system files
+.git/
+.gitignore
+
+# Большие данные и архивы
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Coverage и тесты
+.coverage
+.pytest_cache/
+htmlcov/
+
+# Документация сборки
+docs/_build/

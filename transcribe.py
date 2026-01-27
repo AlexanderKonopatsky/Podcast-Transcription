@@ -74,9 +74,10 @@ torchaudio.load = _patched_torchaudio_load
 from faster_whisper import WhisperModel
 from pyannote.audio import Pipeline
 
-# Глобальная переменная для хранения whisper_model
-# Предотвращает segfault при выходе из функции (деструктор ctranslate2 падает)
-_whisper_model_holder = None
+# Кэш Whisper модели для batch режима: кортеж (model_size, whisper_model)
+# НЕ присваивать None - это вызывает деструктор ctranslate2 который падает с segfault
+# Модель переиспользуется между файлами если размер совпадает
+_whisper_model_cache = None
 
 # Модуль идентификации спикеров по голосу
 from speaker_identification import SpeakerEmbeddingExtractor, SpeakerProfileManager, SpeakerMatcher
@@ -217,34 +218,28 @@ def transcribe_podcast(
     compute_type = "float16" if whisper_device == "cuda" else "int8"
 
     # Управление глобальной моделью для batch режима
-    # Переиспользуем модель если она уже загружена (экономия времени и памяти)
-    global _whisper_model_holder
+    # Кэш хранит кортеж (model_size, whisper_model) для переиспользования
+    global _whisper_model_cache
 
-    # Проверяем нужно ли загружать новую модель
-    need_new_model = (_whisper_model_holder is None or
-                      getattr(_whisper_model_holder, 'model_size_or_path', None) != model_size)
-
-    if need_new_model:
-        # Освобождаем старую модель если есть
-        if _whisper_model_holder is not None:
-            print(f"      Выгрузка предыдущей модели ({getattr(_whisper_model_holder, 'model_size_or_path', 'unknown')})...", flush=True)
-            _whisper_model_holder = None
-            if cuda_available:
-                import gc
-                gc.collect()
-                torch.cuda.empty_cache()
-
-        # Загружаем новую модель
+    # Проверяем есть ли уже загруженная модель нужного размера
+    if _whisper_model_cache is not None:
+        cached_size, cached_model = _whisper_model_cache
+        if cached_size == model_size:
+            # Переиспользуем существующую модель
+            print(f"      Используется загруженная модель Whisper ({model_size})", flush=True)
+            whisper_model = cached_model
+        else:
+            # Размер другой - загружаем новую модель
+            # НЕ удаляем старую модель - это вызывает segfault в ctranslate2
+            print(f"      ВНИМАНИЕ: загрузка модели {model_size} (предыдущая {cached_size} остаётся в памяти)", flush=True)
+            print(f"      Загрузка модели Whisper ({model_size})...", flush=True)
+            whisper_model = WhisperModel(model_size, device=whisper_device, compute_type=compute_type)
+            _whisper_model_cache = (model_size, whisper_model)
+    else:
+        # Первая загрузка модели
         print(f"      Загрузка модели Whisper ({model_size})...", flush=True)
         whisper_model = WhisperModel(model_size, device=whisper_device, compute_type=compute_type)
-
-        # Сохраняем в глобальную переменную чтобы деструктор не вызвался при выходе из функции
-        # (деструктор ctranslate2 вызывает segfault)
-        _whisper_model_holder = whisper_model
-    else:
-        # Переиспользуем уже загруженную модель
-        print(f"      Используется загруженная модель Whisper ({model_size})", flush=True)
-        whisper_model = _whisper_model_holder
+        _whisper_model_cache = (model_size, whisper_model)
 
     print(f"      Распознавание речи...", flush=True)
 
@@ -623,17 +618,8 @@ def process_batch(input_dir: str, output_dir: str, hf_token: str, **kwargs):
     print(f"\nВсе результаты сохранены в папке: {input_dir}")
     print("=" * 80)
 
-    # Очистка памяти после batch обработки
-    global _whisper_model_holder
-    if _whisper_model_holder is not None:
-        print("\nВыгрузка модели Whisper из памяти...")
-        _whisper_model_holder = None
-        cuda_available = torch.cuda.is_available()
-        if cuda_available:
-            import gc
-            gc.collect()
-            torch.cuda.empty_cache()
-            print(f"VRAM освобождена: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+    # НЕ очищаем _whisper_model_cache - это вызывает segfault в ctranslate2
+    # Память освободится автоматически при завершении Python процесса
 
     return 0
 

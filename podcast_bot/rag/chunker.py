@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
+from datetime import datetime
 
 
 @dataclass
@@ -29,6 +30,7 @@ class Chunk:
     """A chunk of conversation for RAG indexing."""
     id: str
     podcast_id: str
+    podcast_date: str  # ISO format date (YYYY-MM-DD)
     timestamp_start: str
     timestamp_end: str
     speakers: list[str]
@@ -39,6 +41,7 @@ class Chunk:
         return {
             "id": self.id,
             "podcast_id": self.podcast_id,
+            "podcast_date": self.podcast_date,
             "timestamp_start": self.timestamp_start,
             "timestamp_end": self.timestamp_end,
             "speakers": self.speakers,
@@ -174,9 +177,18 @@ def build_chunk(utterances: list[Utterance], podcast_id: str, chunk_num: int) ->
             speaker_texts[u.speaker] = []
         speaker_texts[u.speaker].append(u.text)
 
+    # Parse date from podcast_id (format: YYYY-MM-DD)
+    try:
+        podcast_date_obj = datetime.strptime(podcast_id, "%Y-%m-%d").date()
+        podcast_date = podcast_date_obj.isoformat()
+    except ValueError:
+        # Fallback: use current date if can't parse
+        podcast_date = datetime.now().date().isoformat()
+
     return Chunk(
         id=f"{podcast_id}_{chunk_num:03d}",
         podcast_id=podcast_id,
+        podcast_date=podcast_date,
         timestamp_start=utterances[0].timestamp,
         timestamp_end=utterances[-1].timestamp,
         speakers=speakers,
