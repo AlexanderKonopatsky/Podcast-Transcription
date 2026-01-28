@@ -117,6 +117,121 @@ def chat_with_history(
     return result["choices"][0]["message"]["content"]
 
 
+# Async versions for parallel processing
+
+async def achat(
+    system_prompt: str,
+    user_prompt: str,
+    model: str = None,
+    temperature: float = 0.7,
+    max_tokens: int = 1000,
+    timeout: float = 90.0
+) -> str:
+    """
+    Async version of chat() for parallel LLM requests.
+
+    Args:
+        system_prompt: System message setting the persona
+        user_prompt: User message with context and question
+        model: Model to use (default from config)
+        temperature: Sampling temperature
+        max_tokens: Max response tokens
+        timeout: Request timeout in seconds (default 90s for parallel requests)
+
+    Returns:
+        Assistant's response text
+    """
+    model = model or LLM_MODEL
+
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/podcast-persona-bot",
+        "X-Title": "Podcast Persona Bot"
+    }
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt}
+    ]
+
+    data = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens
+    }
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{OPENROUTER_BASE_URL}/chat/completions",
+            headers=headers,
+            json=data,
+            timeout=timeout
+        )
+
+        if response.status_code != 200:
+            raise Exception(f"LLM API error: {response.status_code} - {response.text}")
+
+        result = response.json()
+        return result["choices"][0]["message"]["content"]
+
+
+async def achat_with_history(
+    system_prompt: str,
+    history: list[dict],
+    model: str = None,
+    temperature: float = 0.7,
+    max_tokens: int = 1000,
+    timeout: float = 90.0
+) -> str:
+    """
+    Async chat with conversation history.
+
+    Args:
+        system_prompt: System message
+        history: List of {"role": "user"|"assistant", "content": "..."}
+        model: Model to use
+        temperature: Sampling temperature
+        max_tokens: Max response tokens
+        timeout: Request timeout in seconds
+
+    Returns:
+        Assistant's response
+    """
+    model = model or LLM_MODEL
+
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/podcast-persona-bot",
+        "X-Title": "Podcast Persona Bot"
+    }
+
+    messages = [{"role": "system", "content": system_prompt}] + history
+
+    data = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens
+    }
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{OPENROUTER_BASE_URL}/chat/completions",
+            headers=headers,
+            json=data,
+            timeout=timeout
+        )
+
+        if response.status_code != 200:
+            raise Exception(f"LLM API error: {response.status_code} - {response.text}")
+
+        result = response.json()
+        return result["choices"][0]["message"]["content"]
+
+
 # Test
 if __name__ == "__main__":
     print("Testing LLM client...")

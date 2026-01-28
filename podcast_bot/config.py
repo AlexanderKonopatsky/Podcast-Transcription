@@ -33,6 +33,13 @@ CHUNK_MAX_TOKENS = 700
 CHUNK_OVERLAP_TOKENS = 150
 SEARCH_TOP_K = 5
 
+# Sentiment Analysis Settings
+SENTIMENT_MAX_CONCURRENT_REQUESTS = int(os.getenv("SENTIMENT_MAX_CONCURRENT", "10"))
+SENTIMENT_REQUEST_TIMEOUT = float(os.getenv("SENTIMENT_TIMEOUT", "90.0"))
+SENTIMENT_INCLUDE_FULL_TEXT = os.getenv("SENTIMENT_FULL_TEXT", "true").lower() == "true"
+SENTIMENT_TOP_K = int(os.getenv("SENTIMENT_TOP_K", "5000"))  # Max chunks to search for mentions
+SENTIMENT_MAX_TEXT_LENGTH = int(os.getenv("SENTIMENT_MAX_TEXT_LENGTH", "30000"))  # Max chars per podcast for LLM
+
 # Logging settings
 LOGS_DIR = BASE_DIR / "logs"
 LOG_ENABLED = os.getenv("LOG_ENABLED", "true").lower() == "true"

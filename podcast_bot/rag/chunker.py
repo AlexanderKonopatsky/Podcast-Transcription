@@ -200,11 +200,29 @@ def build_chunk(utterances: list[Utterance], podcast_id: str, chunk_num: int) ->
 def extract_podcast_id(filepath: Path) -> str:
     """Extract podcast ID from filename."""
     name = filepath.stem
-    # Try to extract date from filename
-    date_match = re.search(r'(\d{1,2})-yanvarya-(\d{4})', name)
-    if date_match:
-        day, year = date_match.groups()
-        return f"{year}-01-{int(day):02d}"
+
+    # Map of Russian month names (genitive case) to month numbers
+    MONTHS = {
+        'yanvarya': '01',    # января
+        'fevralya': '02',    # февраля
+        'marta': '03',       # марта
+        'aprelya': '04',     # апреля
+        'maya': '05',        # мая
+        'iyunya': '06',      # июня
+        'iyulya': '07',      # июля
+        'avgusta': '08',     # августа
+        'sentyabrya': '09',  # сентября
+        'oktyabrya': '10',   # октября
+        'noyabrya': '11',    # ноября
+        'dekabrya': '12'     # декабря
+    }
+
+    # Try to extract date from filename: DD-MONTH-YYYY
+    for month_name, month_num in MONTHS.items():
+        date_match = re.search(rf'(\d{{1,2}})-{month_name}-(\d{{4}})', name)
+        if date_match:
+            day, year = date_match.groups()
+            return f"{year}-{month_num}-{int(day):02d}"
 
     # Fallback to filename
     return name[:50]  # Truncate long names
